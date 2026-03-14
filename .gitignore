@@ -19,9 +19,15 @@
 
 # production
 /build
+/data/*.sqlite
+/data/*.sqlite-shm
+/data/*.sqlite-wal
 
 # misc
 .DS_Store
+.idea
+.vscode
+.zed
 *.pem
 
 # debug
@@ -32,6 +38,7 @@ yarn-error.log*
 
 # env files (can opt-in for committing if needed)
 .env*
+!.env.example
 
 # vercel
 .vercel
