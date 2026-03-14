@@ -25,6 +25,11 @@
 
 # misc
 .DS_Store
+.AppleDouble
+.LSOverride
+.Spotlight-V100
+.Trashes
+._*
 .idea
 .vscode
 .zed
