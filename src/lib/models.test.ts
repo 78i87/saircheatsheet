@@ -6,9 +6,10 @@ import {
 } from "@/lib/models";
 
 describe("model reasoning settings", () => {
-  it("uses reasoning_effort for gpt-oss", () => {
+  it("enables reasoning capture for gpt-oss", () => {
     expect(buildReasoningPayload("openai/gpt-oss-120b", "low")).toEqual({
-      reasoning_effort: "low",
+      include_reasoning: true,
+      reasoning: { effort: "low" },
     });
   });
 
@@ -23,10 +24,14 @@ describe("model reasoning settings", () => {
     });
   });
 
-  it("disables low reasoning for llama", () => {
+  it("disables low reasoning for llama models without reasoning support", () => {
     expect(supportsLowReasoning("meta-llama/llama-3.3-70b-instruct")).toBe(false);
     expect(
       buildReasoningPayload("meta-llama/llama-3.3-70b-instruct", "low"),
     ).toEqual({});
+    expect(supportsLowReasoning("meta-llama/llama-4-maverick")).toBe(false);
+    expect(buildReasoningPayload("meta-llama/llama-4-maverick", "low")).toEqual(
+      {},
+    );
   });
 });

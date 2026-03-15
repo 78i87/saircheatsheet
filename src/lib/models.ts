@@ -55,6 +55,16 @@ export const SUPPORTED_MODELS: ModelOption[] = [
       completion: 0.00000032,
     },
   },
+  {
+    id: "meta-llama/llama-4-maverick",
+    label: "Llama 4 Maverick",
+    provider: "Meta",
+    supportsLowReasoning: false,
+    pricingFallback: {
+      prompt: 0.00000015,
+      completion: 0.0000006,
+    },
+  },
 ];
 
 export function getModelOption(modelId: string): ModelOption {
@@ -69,12 +79,17 @@ export function buildReasoningPayload(
   modelId: string,
   reasoningMode: ReasoningMode,
 ) {
-  if (reasoningMode !== "low") {
-    return {};
+  if (modelId === "openai/gpt-oss-120b") {
+    return {
+      include_reasoning: true as const,
+      ...(reasoningMode === "low"
+        ? { reasoning: { effort: "low" as const } }
+        : {}),
+    };
   }
 
-  if (modelId === "openai/gpt-oss-120b") {
-    return { reasoning_effort: "low" as const };
+  if (reasoningMode !== "low") {
+    return {};
   }
 
   if (

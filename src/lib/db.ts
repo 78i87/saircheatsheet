@@ -17,6 +17,15 @@ export type SeedProblem = {
   answer: boolean;
 };
 
+type RawDatasetProblem = {
+  id: string;
+  index: number;
+  difficulty: Difficulty;
+  equation1: string;
+  equation2: string;
+  answer: boolean;
+};
+
 let dbInstance: Database.Database | null = null;
 let initPromise: Promise<void> | null = null;
 
@@ -85,6 +94,7 @@ export function applySchema(db: Database.Database) {
       parsed_verdict TEXT,
       is_correct INTEGER,
       raw_response TEXT,
+      raw_reasoning TEXT,
       rendered_prompt TEXT NOT NULL,
       duration_ms INTEGER,
       prompt_tokens INTEGER,
@@ -103,6 +113,34 @@ export function applySchema(db: Database.Database) {
     CREATE INDEX IF NOT EXISTS idx_run_items_batch_id
       ON run_items (batch_id, id);
   `);
+
+  const runBatchColumns = db
+    .prepare("PRAGMA table_info(run_batches)")
+    .all() as Array<{ name: string }>;
+  const hasStopRequestedAt = runBatchColumns.some(
+    (column) => column.name === "stop_requested_at",
+  );
+
+  if (!hasStopRequestedAt) {
+    db.exec(`
+      ALTER TABLE run_batches
+      ADD COLUMN stop_requested_at TEXT
+    `);
+  }
+
+  const runItemColumns = db
+    .prepare("PRAGMA table_info(run_items)")
+    .all() as Array<{ name: string }>;
+  const hasRawReasoning = runItemColumns.some(
+    (column) => column.name === "raw_reasoning",
+  );
+
+  if (!hasRawReasoning) {
+    db.exec(`
+      ALTER TABLE run_items
+      ADD COLUMN raw_reasoning TEXT
+    `);
+  }
 }
 
 export async function initializeDatabase() {
@@ -117,7 +155,10 @@ export async function initializeDatabase() {
         const problems = await downloadAllProblems();
         seedProblems(db, problems);
       }
-    })();
+    })().catch((error) => {
+      initPromise = null;
+      throw error;
+    });
   }
 
   return initPromise;
@@ -165,7 +206,17 @@ async function downloadJsonl(url: string) {
     .split("\n")
     .map((line) => line.trim())
     .filter(Boolean)
-    .map((line) => JSON.parse(line) as SeedProblem);
+    .map((line) => {
+      const row = JSON.parse(line) as RawDatasetProblem;
+      return {
+        dataset_id: row.id,
+        index: row.index,
+        difficulty: row.difficulty,
+        equation1: row.equation1,
+        equation2: row.equation2,
+        answer: row.answer,
+      } satisfies SeedProblem;
+    });
 }
 
 async function downloadAllProblems() {

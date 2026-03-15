@@ -1,6 +1,7 @@
 import type {
   CheatsheetRecord,
   ProblemRecord,
+  RunBatchStatus,
   RunBatchDetail,
   RunBatchSummary,
   RunItemDetail,
@@ -34,6 +35,22 @@ function mapProblem(row: {
 
 function nowIso() {
   return new Date().toISOString();
+}
+
+const batchAbortControllers = new Map<number, AbortController>();
+
+function isAbortError(error: unknown) {
+  return error instanceof Error && error.name === "AbortError";
+}
+
+async function getBatchStopRequestedAt(batchId: number) {
+  await initializeDatabase();
+  const db = getDb();
+  const row = db
+    .prepare("SELECT stop_requested_at FROM run_batches WHERE id = ?")
+    .get(batchId) as { stop_requested_at: string | null } | undefined;
+
+  return row?.stop_requested_at ?? null;
 }
 
 export async function listProblems(input: {
@@ -245,10 +262,11 @@ export async function listRunBatches() {
           b.cheatsheet_id,
           c.name AS cheatsheet_name,
           b.status,
+          b.stop_requested_at,
           b.started_at,
           b.finished_at,
           b.total_count,
-          b.correct_count,
+          COALESCE(SUM(CASE WHEN i.is_correct = 1 THEN 1 ELSE 0 END), 0) AS correct_count,
           COALESCE(COUNT(i.id), 0) AS completed_count,
           GROUP_CONCAT(DISTINCT p.difficulty) AS difficulties
         FROM run_batches b
@@ -266,7 +284,8 @@ export async function listRunBatches() {
     reasoning_mode: ReasoningMode;
     cheatsheet_id: number | null;
     cheatsheet_name: string | null;
-    status: "queued" | "running" | "completed" | "failed";
+    status: RunBatchStatus;
+    stop_requested_at: string | null;
     started_at: string;
     finished_at: string | null;
     total_count: number;
@@ -283,6 +302,7 @@ export async function listRunBatches() {
     cheatsheetId: row.cheatsheet_id,
     cheatsheetName: row.cheatsheet_name,
     status: row.status,
+    stopRequestedAt: row.stop_requested_at,
     startedAt: row.started_at,
     finishedAt: row.finished_at,
     totalCount: row.total_count,
@@ -294,6 +314,45 @@ export async function listRunBatches() {
       ? (row.difficulties.split(",") as Difficulty[])
       : [],
   })) satisfies RunBatchSummary[];
+}
+
+export async function requestStopRunBatch(batchId: number) {
+  await initializeDatabase();
+  const db = getDb();
+  const timestamp = nowIso();
+
+  const result = db
+    .prepare(
+      `
+        UPDATE run_batches
+        SET
+          stop_requested_at = COALESCE(stop_requested_at, @stopRequestedAt),
+          status = 'failed',
+          finished_at = COALESCE(finished_at, @finishedAt),
+          correct_count = (
+            SELECT COALESCE(SUM(CASE WHEN is_correct = 1 THEN 1 ELSE 0 END), 0)
+            FROM run_items
+            WHERE batch_id = @id
+          ),
+          updated_at = @updatedAt
+        WHERE id = @id
+          AND status IN ('queued', 'running')
+      `,
+    )
+    .run({
+      id: batchId,
+      stopRequestedAt: timestamp,
+      finishedAt: timestamp,
+      updatedAt: timestamp,
+    });
+
+  if (result.changes === 0) {
+    return getRunBatch(batchId);
+  }
+
+  batchAbortControllers.get(batchId)?.abort();
+
+  return getRunBatch(batchId);
 }
 
 export async function getRunBatch(batchId: number) {
@@ -328,6 +387,7 @@ export async function getRunBatch(batchId: number) {
     parsed_verdict: "TRUE" | "FALSE" | null;
     is_correct: number | null;
     raw_response: string | null;
+    raw_reasoning: string | null;
     rendered_prompt: string;
     duration_ms: number | null;
     prompt_tokens: number | null;
@@ -360,6 +420,7 @@ export async function getRunBatch(batchId: number) {
     parsedVerdict: row.parsed_verdict,
     isCorrect: row.is_correct === null ? null : Boolean(row.is_correct),
     rawResponse: row.raw_response,
+    rawReasoning: row.raw_reasoning,
     renderedPrompt: row.rendered_prompt,
     durationMs: row.duration_ms,
     promptTokens: row.prompt_tokens,
@@ -386,10 +447,19 @@ async function processRunBatch(
   },
 ) {
   const db = getDb();
+  const stopRequestedBeforeStart = await getBatchStopRequestedAt(batchId);
+  const batchAbortController = new AbortController();
+  batchAbortControllers.set(batchId, batchAbortController);
 
-  db.prepare(
-    "UPDATE run_batches SET status = 'running', updated_at = ? WHERE id = ?",
-  ).run(nowIso(), batchId);
+  if (stopRequestedBeforeStart) {
+    batchAbortController.abort();
+  }
+
+  if (!stopRequestedBeforeStart) {
+    db.prepare(
+      "UPDATE run_batches SET status = 'running', updated_at = ? WHERE id = ?",
+    ).run(nowIso(), batchId);
+  }
 
   const cheatsheet = input.cheatsheetId
     ? await getCheatsheetById(input.cheatsheetId)
@@ -423,6 +493,16 @@ async function processRunBatch(
 
   try {
     await runWithConcurrency(problems, 5, async (problem) => {
+      if (batchAbortController.signal.aborted) {
+        return;
+      }
+
+      const stopRequestedAt = await getBatchStopRequestedAt(batchId);
+      if (stopRequestedAt) {
+        batchAbortController.abort();
+        return;
+      }
+
       const renderedPrompt = renderSystemPrompt(problem, cheatsheet?.content ?? null);
       const createdAt = nowIso();
 
@@ -433,68 +513,142 @@ async function processRunBatch(
             ? input.reasoningMode
             : "default",
           systemPrompt: renderedPrompt,
+          signal: batchAbortController.signal,
         });
-        const parsed = parseModelResponse(modelResult.content);
-        const isCorrect = parsed.verdict === problem.expectedAnswer;
+        try {
+          const parsed = parseModelResponse(modelResult.content);
+          const isCorrect = parsed.verdict === problem.expectedAnswer;
 
-        db.prepare(
-          `
-            INSERT INTO run_items (
-              batch_id,
-              problem_id,
-              expected_answer,
-              parsed_verdict,
-              is_correct,
-              raw_response,
-              rendered_prompt,
-              duration_ms,
-              prompt_tokens,
-              completion_tokens,
-              reasoning_tokens,
-              estimated_cost_usd,
-              pricing_json,
-              error,
-              status,
-              created_at,
-              updated_at
-            ) VALUES (
-              @batchId,
-              @problemId,
-              @expectedAnswer,
-              @parsedVerdict,
-              @isCorrect,
-              @rawResponse,
-              @renderedPrompt,
-              @durationMs,
-              @promptTokens,
-              @completionTokens,
-              @reasoningTokens,
-              @estimatedCostUsd,
-              @pricingJson,
-              NULL,
-              'completed',
-              @createdAt,
-              @updatedAt
-            )
-          `,
-        ).run({
-          batchId,
-          problemId: problem.id,
-          expectedAnswer: problem.expectedAnswer ? 1 : 0,
-          parsedVerdict: parsed.verdictLabel,
-          isCorrect: isCorrect ? 1 : 0,
-          rawResponse: modelResult.content,
-          renderedPrompt,
-          durationMs: modelResult.durationMs,
-          promptTokens: modelResult.promptTokens,
-          completionTokens: modelResult.completionTokens,
-          reasoningTokens: modelResult.reasoningTokens,
-          estimatedCostUsd: modelResult.estimatedCostUsd,
-          pricingJson: JSON.stringify(modelResult.pricing),
-          createdAt,
-          updatedAt: nowIso(),
-        });
+          db.prepare(
+            `
+              INSERT INTO run_items (
+                batch_id,
+                problem_id,
+                expected_answer,
+                parsed_verdict,
+                is_correct,
+                raw_response,
+                raw_reasoning,
+                rendered_prompt,
+                duration_ms,
+                prompt_tokens,
+                completion_tokens,
+                reasoning_tokens,
+                estimated_cost_usd,
+                pricing_json,
+                error,
+                status,
+                created_at,
+                updated_at
+              ) VALUES (
+                @batchId,
+                @problemId,
+                @expectedAnswer,
+                @parsedVerdict,
+                @isCorrect,
+                @rawResponse,
+                @rawReasoning,
+                @renderedPrompt,
+                @durationMs,
+                @promptTokens,
+                @completionTokens,
+                @reasoningTokens,
+                @estimatedCostUsd,
+                @pricingJson,
+                NULL,
+                'completed',
+                @createdAt,
+                @updatedAt
+              )
+            `,
+          ).run({
+            batchId,
+            problemId: problem.id,
+            expectedAnswer: problem.expectedAnswer ? 1 : 0,
+            parsedVerdict: parsed.verdictLabel,
+            isCorrect: isCorrect ? 1 : 0,
+            rawResponse: modelResult.content,
+            rawReasoning: modelResult.reasoning,
+            renderedPrompt,
+            durationMs: modelResult.durationMs,
+            promptTokens: modelResult.promptTokens,
+            completionTokens: modelResult.completionTokens,
+            reasoningTokens: modelResult.reasoningTokens,
+            estimatedCostUsd: modelResult.estimatedCostUsd,
+            pricingJson: JSON.stringify(modelResult.pricing),
+            createdAt,
+            updatedAt: nowIso(),
+          });
+        } catch (error) {
+          hadFailure = true;
+          const message =
+            error instanceof Error ? error.message : "Unknown response parsing error.";
+
+          db.prepare(
+            `
+              INSERT INTO run_items (
+                batch_id,
+                problem_id,
+                expected_answer,
+                parsed_verdict,
+                is_correct,
+                raw_response,
+                raw_reasoning,
+                rendered_prompt,
+                duration_ms,
+                prompt_tokens,
+                completion_tokens,
+                reasoning_tokens,
+                estimated_cost_usd,
+                pricing_json,
+                error,
+                status,
+                created_at,
+                updated_at
+              ) VALUES (
+                @batchId,
+                @problemId,
+                @expectedAnswer,
+                NULL,
+                NULL,
+                @rawResponse,
+                @rawReasoning,
+                @renderedPrompt,
+                @durationMs,
+                @promptTokens,
+                @completionTokens,
+                @reasoningTokens,
+                @estimatedCostUsd,
+                @pricingJson,
+                @error,
+                'failed',
+                @createdAt,
+                @updatedAt
+              )
+            `,
+          ).run({
+            batchId,
+            problemId: problem.id,
+            expectedAnswer: problem.expectedAnswer ? 1 : 0,
+            rawResponse: modelResult.content,
+            rawReasoning: modelResult.reasoning,
+            renderedPrompt,
+            durationMs: modelResult.durationMs,
+            promptTokens: modelResult.promptTokens,
+            completionTokens: modelResult.completionTokens,
+            reasoningTokens: modelResult.reasoningTokens,
+            estimatedCostUsd: modelResult.estimatedCostUsd,
+            pricingJson: JSON.stringify(modelResult.pricing),
+            error: message,
+            createdAt,
+            updatedAt: nowIso(),
+          });
+        }
       } catch (error) {
+        if (isAbortError(error) && batchAbortController.signal.aborted) {
+          return;
+        }
+
         hadFailure = true;
         const message =
           error instanceof Error ? error.message : "Unknown model execution error.";
@@ -507,6 +661,7 @@ async function processRunBatch(
               parsed_verdict,
               is_correct,
               raw_response,
+              raw_reasoning,
               rendered_prompt,
               duration_ms,
               prompt_tokens,
@@ -523,7 +678,8 @@ async function processRunBatch(
               @problemId,
               @expectedAnswer,
               NULL,
-              0,
+              NULL,
+              NULL,
               NULL,
               @renderedPrompt,
               NULL,
@@ -561,6 +717,15 @@ async function processRunBatch(
         `,
       )
       .get(batchId) as { completed_count: number; correct_count: number };
+    const stopRequestedAt = await getBatchStopRequestedAt(batchId);
+    const wasStopped =
+      stopRequestedAt !== null && totals.completed_count < input.problemIds.length;
+    const finalStatus: RunBatchStatus = wasStopped
+      ? "failed"
+      : hadFailure
+        ? "failed"
+        : "completed";
+    const finishedAt = nowIso();
 
     db.prepare(
       `
@@ -575,9 +740,11 @@ async function processRunBatch(
     ).run({
       id: batchId,
       correctCount: totals.correct_count,
-      status: hadFailure ? "failed" : "completed",
-      finishedAt: nowIso(),
-      updatedAt: nowIso(),
+      status: finalStatus,
+      finishedAt,
+      updatedAt: finishedAt,
     });
+
+    batchAbortControllers.delete(batchId);
   }
 }

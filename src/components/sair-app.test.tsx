@@ -1,7 +1,8 @@
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { SairApp } from "@/components/sair-app";
+import { MAX_CHEATSHEET_BYTES } from "@/lib/cheatsheet";
 
 const problemFixture = [
   {
@@ -32,6 +33,7 @@ const batchSummaryFixture = {
   cheatsheetId: null,
   cheatsheetName: null,
   status: "completed",
+  stopRequestedAt: null,
   startedAt: "2026-03-14T12:00:00.000Z",
   finishedAt: "2026-03-14T12:00:10.000Z",
   totalCount: 1,
@@ -52,6 +54,7 @@ const batchDetailFixture = {
       isCorrect: true,
       rawResponse:
         "VERDICT: TRUE\nREASONING: Symmetry.\nPROOF: Direct.\nCOUNTEREXAMPLE:",
+      rawReasoning: "I tested a commutativity pattern and it held.",
       renderedPrompt: "prompt body",
       durationMs: 1200,
       promptTokens: 100,
@@ -115,6 +118,10 @@ describe("SairApp", () => {
     vi.stubGlobal("confirm", vi.fn(() => true));
   });
 
+  afterEach(() => {
+    cleanup();
+  });
+
   it("supports core run and history interactions", async () => {
     installFetchMock();
     render(<SairApp />);
@@ -127,13 +134,13 @@ describe("SairApp", () => {
     expect(screen.getByRole("button", { name: /run 1 problem/i })).toBeEnabled();
 
     fireEvent.click(screen.getByRole("button", { name: /new/i }));
-    fireEvent.change(screen.getByPlaceholderText(/cheatsheet name/i), {
+    fireEvent.change(screen.getByPlaceholderText(/title/i), {
       target: { value: "Lemma pack" },
     });
-    fireEvent.change(screen.getByPlaceholderText(/paste reusable lemmas/i), {
+    fireEvent.change(screen.getByPlaceholderText(/cheatsheet content/i), {
       target: { value: "Useful" },
     });
-    fireEvent.click(screen.getByRole("button", { name: /save cheatsheet/i }));
+    fireEvent.click(screen.getByRole("button", { name: /^create$/i }));
 
     await waitFor(() => {
       expect(screen.getByRole("option", { name: /lemma pack/i })).toBeInTheDocument();
@@ -143,9 +150,123 @@ describe("SairApp", () => {
 
     expect(await screen.findByText(/current batch/i)).toBeInTheDocument();
     expect(await screen.findByText(/output: true \| expected: true/i)).toBeInTheDocument();
+    expect(screen.getByText(/show reasoning/i)).toBeInTheDocument();
 
     fireEvent.click(screen.getByRole("button", { name: /history/i }));
     expect(await screen.findByText(/batch #7/i)).toBeInTheDocument();
     expect(screen.getAllByText(/gpt oss 120b/i)[0]).toBeInTheDocument();
+  });
+
+  it("blocks oversized cheatsheets from being saved", async () => {
+    const fetchMock = installFetchMock();
+    render(<SairApp />);
+
+    await screen.findByText(/choose a model, a cheatsheet, and a set of problems/i);
+
+    fireEvent.click(screen.getByRole("button", { name: /new/i }));
+    fireEvent.change(screen.getByPlaceholderText(/title/i), {
+      target: { value: "Oversized" },
+    });
+    fireEvent.change(screen.getByPlaceholderText(/cheatsheet content/i), {
+      target: { value: "a".repeat(MAX_CHEATSHEET_BYTES + 1) },
+    });
+
+    expect(
+      screen.getByText(/cheatsheet content must be 10 kb or smaller\./i),
+    ).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /^create$/i })).toBeDisabled();
+
+    expect(
+      fetchMock.mock.calls.some(
+        ([input, init]) => input === "/api/cheatsheets" && init?.method === "POST",
+      ),
+    ).toBe(false);
+  });
+
+  it("does not close the cheatsheet modal when selection ends on the backdrop", async () => {
+    installFetchMock();
+    render(<SairApp />);
+
+    const [newButton] = await screen.findAllByRole("button", { name: /new/i });
+    fireEvent.click(newButton);
+
+    const textarea = screen.getByPlaceholderText(/cheatsheet content/i);
+    const backdrop = screen.getByRole("presentation");
+
+    fireEvent.mouseDown(textarea);
+    fireEvent.mouseUp(backdrop);
+    fireEvent.click(backdrop);
+
+    expect(screen.getByRole("dialog", { name: /new cheatsheet/i })).toBeInTheDocument();
+    expect(screen.getByPlaceholderText(/cheatsheet content/i)).toBeInTheDocument();
+  });
+
+  it("allows stopping a running batch from history", async () => {
+    const runningBatch = {
+      ...batchSummaryFixture,
+      status: "running" as const,
+      finishedAt: null,
+      completedCount: 0,
+      correctCount: 0,
+      accuracy: null,
+    };
+    const stoppingBatch = {
+      ...runningBatch,
+      status: "failed" as const,
+      stopRequestedAt: "2026-03-14T12:00:05.000Z",
+      finishedAt: "2026-03-14T12:00:05.000Z",
+    };
+    const runningDetail = {
+      ...runningBatch,
+      items: [],
+    };
+    const stoppedDetail = {
+      ...stoppingBatch,
+      items: [],
+    };
+
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = typeof input === "string" ? input : input.toString();
+
+      if (url === "/api/problems" && !init?.method) {
+        return new Response(JSON.stringify({ problems: problemFixture }));
+      }
+
+      if (url === "/api/cheatsheets" && !init?.method) {
+        return new Response(JSON.stringify({ cheatsheets: [] }));
+      }
+
+      if (url === "/api/runs" && !init?.method) {
+        return new Response(JSON.stringify({ batches: [runningBatch] }));
+      }
+
+      if (url === "/api/runs/7" && !init?.method) {
+        return new Response(JSON.stringify({ batch: runningDetail }));
+      }
+
+      if (url === "/api/runs/7" && init?.method === "PATCH") {
+        return new Response(JSON.stringify({ batch: stoppedDetail }));
+      }
+
+      throw new Error(`Unexpected fetch: ${url} ${init?.method ?? "GET"}`);
+    });
+
+    vi.stubGlobal("fetch", fetchMock);
+    render(<SairApp />);
+
+    await screen.findByRole("button", { name: /history/i });
+
+    fireEvent.click(screen.getByRole("button", { name: /history/i }));
+    fireEvent.click(await screen.findByRole("button", { name: /stop evaluation/i }));
+
+    await waitFor(() => {
+      expect(screen.getAllByText(/^stopped$/i).length).toBeGreaterThan(0);
+    });
+
+    expect(
+      fetchMock.mock.calls.some(
+        ([input, init]) => input === "/api/runs/7" && init?.method === "PATCH",
+      ),
+    ).toBe(true);
   });
 });

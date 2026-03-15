@@ -10,6 +10,7 @@ Local/self-hosted web app for benchmarking OpenRouter models on the SAIR equatio
   - `x-ai/grok-4.1-fast`
   - `google/gemini-3.1-flash-lite-preview`
   - `meta-llama/llama-3.3-70b-instruct`
+  - `meta-llama/llama-4-maverick`
 - Optional saved cheatsheets injected into the system prompt.
 - Automatic verdict parsing and correctness scoring against the dataset label.
 - Batch history with prompt, response, timing, tokens, reasoning tokens, and estimated cost.
@@ -58,7 +59,7 @@ The SQLite database is stored at `data/sair-model-eval.sqlite`.
 - OpenRouter calls are made server-side only.
 - Run batches execute in the background with concurrency `5`.
 - Cost is estimated from token usage and a pricing snapshot fetched from OpenRouter at run time, with a static fallback if the model catalog request fails.
-- Llama 3.3 70B Instruct does not expose the low-reasoning toggle, so the UI disables it for that model.
+- Llama 3.3 70B Instruct and Llama 4 Maverick do not expose the low-reasoning toggle, so the UI disables it for those models.
 
 ## Verification
 

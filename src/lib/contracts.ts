@@ -1,5 +1,7 @@
 import type { Difficulty, ReasoningMode } from "@/lib/models";
 
+export type RunBatchStatus = "queued" | "running" | "completed" | "failed";
+
 export type ProblemRecord = {
   id: number;
   datasetId: string;
@@ -25,7 +27,8 @@ export type RunBatchSummary = {
   reasoningMode: ReasoningMode;
   cheatsheetId: number | null;
   cheatsheetName: string | null;
-  status: "queued" | "running" | "completed" | "failed";
+  status: RunBatchStatus;
+  stopRequestedAt: string | null;
   startedAt: string;
   finishedAt: string | null;
   totalCount: number;
@@ -42,6 +45,7 @@ export type RunItemDetail = {
   parsedVerdict: "TRUE" | "FALSE" | null;
   isCorrect: boolean | null;
   rawResponse: string | null;
+  rawReasoning: string | null;
   renderedPrompt: string;
   durationMs: number | null;
   promptTokens: number | null;

@@ -37,4 +37,15 @@ describe("seedProblems", () => {
 
     expect(count.count).toBe(1);
   });
+
+  it("adds the raw_reasoning column to run_items", () => {
+    const db = new Database(":memory:");
+    applySchema(db);
+
+    const columns = db
+      .prepare("PRAGMA table_info(run_items)")
+      .all() as Array<{ name: string }>;
+
+    expect(columns.some((column) => column.name === "raw_reasoning")).toBe(true);
+  });
 });
