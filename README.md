@@ -53,6 +53,41 @@ The SQLite database is stored at `data/sair-model-eval.sqlite`.
 - `npm run lint`
 - `npm run test`
 - `npm run build`
+- `npm run eval -- --help`
+
+## CLI Usage
+
+Run persisted SAIR batches directly from the terminal:
+
+```bash
+npm run eval -- \
+  --model gpt-oss \
+  --difficulty normal \
+  --problems 1,2,5-10 \
+  --reasoning low \
+  --cheatsheet ./notes.txt
+```
+
+Behavior:
+
+- Saves results into the same SQLite history used by the web app.
+- Prints foreground progress and a final summary with accuracy, duration, and estimated cost.
+- Exits with a non-zero status if the batch fails or is stopped.
+- Handles `Ctrl+C` by requesting a clean stop for the active batch.
+
+Problem selection:
+
+- `--problems` accepts comma-separated indexes and inclusive ranges.
+- Indexes are interpreted as `problem_index` values within the selected `--difficulty`.
+- Example: `--difficulty normal --problems 1-50`
+
+Model aliases:
+
+- `gpt-oss` -> `openai/gpt-oss-120b`
+- `grok` -> `x-ai/grok-4.1-fast`
+- `gemini-flash-lite` -> `google/gemini-3.1-flash-lite-preview`
+- `llama-3.3` -> `meta-llama/llama-3.3-70b-instruct`
+- `llama-4` -> `meta-llama/llama-4-maverick`
 
 ## Technical Notes
 

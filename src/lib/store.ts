@@ -1,17 +1,51 @@
 import type {
   CheatsheetRecord,
   ProblemRecord,
-  RunBatchStatus,
   RunBatchDetail,
+  RunBatchStatus,
   RunBatchSummary,
   RunItemDetail,
 } from "@/lib/contracts";
 import { getDb, initializeDatabase } from "@/lib/db";
 import { runWithConcurrency } from "@/lib/concurrency";
-import { getModelOption, type Difficulty, type ReasoningMode } from "@/lib/models";
+import {
+  getModelOption,
+  normalizeReasoningMode,
+  type Difficulty,
+  type ReasoningMode,
+} from "@/lib/models";
 import { executeModelRun } from "@/lib/openrouter";
 import { parseModelResponse } from "@/lib/parser";
 import { renderSystemPrompt } from "@/lib/prompt";
+
+type RunBatchInput = {
+  problemIds: number[];
+  modelId: string;
+  reasoningMode: ReasoningMode;
+  cheatsheetId: number | null;
+  cheatsheetContent?: string | null;
+};
+
+export type RunBatchProgressEvent = {
+  batchId: number;
+  totalCount: number;
+  completedCount: number;
+  correctCount: number;
+  problemId: number;
+  problemIndex: number;
+  status: "completed" | "failed";
+  isCorrect: boolean | null;
+  error: string | null;
+};
+
+type PreparedRunBatch = {
+  batchId: number;
+  executionInput: Required<Pick<RunBatchInput, "cheatsheetId" | "problemIds">> &
+    Pick<RunBatchInput, "cheatsheetContent"> & {
+      modelId: string;
+      reasoningMode: ReasoningMode;
+    };
+};
 
 function mapProblem(row: {
   id: number;
@@ -82,6 +116,39 @@ export async function listProblems(input: {
   `;
 
   const rows = db.prepare(query).all(params) as Array<{
+    id: number;
+    dataset_id: string;
+    problem_index: number;
+    difficulty: Difficulty;
+    equation1: string;
+    equation2: string;
+    expected_answer: number;
+  }>;
+
+  return rows.map(mapProblem);
+}
+
+export async function listProblemsByIndexes(input: {
+  difficulty: Difficulty;
+  indexes: number[];
+}) {
+  await initializeDatabase();
+  if (input.indexes.length === 0) {
+    return [];
+  }
+
+  const db = getDb();
+  const rows = db
+    .prepare(
+      `
+        SELECT *
+        FROM problems
+        WHERE difficulty = ?
+          AND problem_index IN (${input.indexes.map(() => "?").join(",")})
+        ORDER BY problem_index ASC
+      `,
+    )
+    .all(input.difficulty, ...input.indexes) as Array<{
     id: number;
     dataset_id: string;
     problem_index: number;
@@ -191,19 +258,22 @@ export async function getCheatsheetById(id: number) {
   } satisfies CheatsheetRecord;
 }
 
-export async function createRunBatch(input: {
-  problemIds: number[];
-  modelId: string;
-  reasoningMode: ReasoningMode;
-  cheatsheetId: number | null;
-}) {
+async function createRunBatchRecord(input: RunBatchInput): Promise<PreparedRunBatch> {
   await initializeDatabase();
+  if (input.problemIds.length === 0) {
+    throw new Error("Run batches require at least one problem id.");
+  }
+
   const db = getDb();
   const timestamps = {
     startedAt: nowIso(),
     createdAt: nowIso(),
   };
   const model = getModelOption(input.modelId);
+  const resolvedReasoningMode = normalizeReasoningMode(
+    input.modelId,
+    input.reasoningMode,
+  );
 
   const result = db
     .prepare(
@@ -235,7 +305,7 @@ export async function createRunBatch(input: {
     .run({
       modelId: input.modelId,
       modelLabel: model.label,
-      reasoningMode: model.supportsLowReasoning ? input.reasoningMode : "default",
+      reasoningMode: resolvedReasoningMode,
       cheatsheetId: input.cheatsheetId,
       startedAt: timestamps.startedAt,
       totalCount: input.problemIds.length,
@@ -243,9 +313,42 @@ export async function createRunBatch(input: {
       updatedAt: timestamps.createdAt,
     });
 
-  const batchId = Number(result.lastInsertRowid);
-  void processRunBatch(batchId, input);
-  return batchId;
+  return {
+    batchId: Number(result.lastInsertRowid),
+    executionInput: {
+      problemIds: input.problemIds,
+      modelId: input.modelId,
+      reasoningMode: resolvedReasoningMode,
+      cheatsheetId: input.cheatsheetId,
+      cheatsheetContent: input.cheatsheetContent ?? null,
+    },
+  };
+}
+
+export async function createRunBatch(input: {
+  problemIds: number[];
+  modelId: string;
+  reasoningMode: ReasoningMode;
+  cheatsheetId: number | null;
+}) {
+  const prepared = await createRunBatchRecord(input);
+  void executeRunBatch(prepared.batchId, prepared.executionInput).catch((error) => {
+    console.error(`Run batch ${prepared.batchId} failed to execute.`, error);
+  });
+  return prepared.batchId;
+}
+
+export async function runBatchForeground(
+  input: RunBatchInput,
+  options?: {
+    onBatchCreated?: (batchId: number) => void | Promise<void>;
+    onProgress?: (event: RunBatchProgressEvent) => void;
+  },
+) {
+  const prepared = await createRunBatchRecord(input);
+  await options?.onBatchCreated?.(prepared.batchId);
+  await executeRunBatch(prepared.batchId, prepared.executionInput, options?.onProgress);
+  return prepared.batchId;
 }
 
 export async function listRunBatches() {
@@ -437,14 +540,10 @@ export async function getRunBatch(batchId: number) {
   } satisfies RunBatchDetail;
 }
 
-async function processRunBatch(
+async function executeRunBatch(
   batchId: number,
-  input: {
-    problemIds: number[];
-    modelId: string;
-    reasoningMode: ReasoningMode;
-    cheatsheetId: number | null;
-  },
+  input: PreparedRunBatch["executionInput"],
+  onProgress?: (event: RunBatchProgressEvent) => void,
 ) {
   const db = getDb();
   const stopRequestedBeforeStart = await getBatchStopRequestedAt(batchId);
@@ -461,9 +560,10 @@ async function processRunBatch(
     ).run(nowIso(), batchId);
   }
 
-  const cheatsheet = input.cheatsheetId
+  const savedCheatsheet = input.cheatsheetId
     ? await getCheatsheetById(input.cheatsheetId)
     : null;
+  const cheatsheetContent = input.cheatsheetContent ?? savedCheatsheet?.content ?? null;
   const problems = db
     .prepare(
       `
@@ -490,6 +590,8 @@ async function processRunBatch(
     );
 
   let hadFailure = false;
+  let completedCount = 0;
+  let correctCount = 0;
 
   try {
     await runWithConcurrency(problems, 5, async (problem) => {
@@ -503,21 +605,20 @@ async function processRunBatch(
         return;
       }
 
-      const renderedPrompt = renderSystemPrompt(problem, cheatsheet?.content ?? null);
+      const renderedPrompt = renderSystemPrompt(problem, cheatsheetContent);
       const createdAt = nowIso();
 
       try {
         const modelResult = await executeModelRun({
           modelId: input.modelId,
-          reasoningMode: getModelOption(input.modelId).supportsLowReasoning
-            ? input.reasoningMode
-            : "default",
+          reasoningMode: input.reasoningMode,
           systemPrompt: renderedPrompt,
           signal: batchAbortController.signal,
         });
         try {
           const parsed = parseModelResponse(modelResult.content);
           const isCorrect = parsed.verdict === problem.expectedAnswer;
+          const updatedAt = nowIso();
 
           db.prepare(
             `
@@ -577,12 +678,29 @@ async function processRunBatch(
             estimatedCostUsd: modelResult.estimatedCostUsd,
             pricingJson: JSON.stringify(modelResult.pricing),
             createdAt,
-            updatedAt: nowIso(),
+            updatedAt,
+          });
+
+          completedCount += 1;
+          if (isCorrect) {
+            correctCount += 1;
+          }
+          onProgress?.({
+            batchId,
+            totalCount: input.problemIds.length,
+            completedCount,
+            correctCount,
+            problemId: problem.id,
+            problemIndex: problem.index,
+            status: "completed",
+            isCorrect,
+            error: null,
           });
         } catch (error) {
           hadFailure = true;
           const message =
             error instanceof Error ? error.message : "Unknown response parsing error.";
+          const updatedAt = nowIso();
 
           db.prepare(
             `
@@ -641,7 +759,20 @@ async function processRunBatch(
             pricingJson: JSON.stringify(modelResult.pricing),
             error: message,
             createdAt,
-            updatedAt: nowIso(),
+            updatedAt,
+          });
+
+          completedCount += 1;
+          onProgress?.({
+            batchId,
+            totalCount: input.problemIds.length,
+            completedCount,
+            correctCount,
+            problemId: problem.id,
+            problemIndex: problem.index,
+            status: "failed",
+            isCorrect: null,
+            error: message,
           });
         }
       } catch (error) {
@@ -652,6 +783,7 @@ async function processRunBatch(
         hadFailure = true;
         const message =
           error instanceof Error ? error.message : "Unknown model execution error.";
+        const updatedAt = nowIso();
         db.prepare(
           `
             INSERT INTO run_items (
@@ -701,7 +833,20 @@ async function processRunBatch(
           renderedPrompt,
           error: message,
           createdAt,
-          updatedAt: nowIso(),
+          updatedAt,
+        });
+
+        completedCount += 1;
+        onProgress?.({
+          batchId,
+          totalCount: input.problemIds.length,
+          completedCount,
+          correctCount,
+          problemId: problem.id,
+          problemIndex: problem.index,
+          status: "failed",
+          isCorrect: null,
+          error: message,
         });
       }
     });

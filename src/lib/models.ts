@@ -13,6 +13,11 @@ export type ModelOption = {
   };
 };
 
+export type ModelAlias = {
+  alias: string;
+  modelId: string;
+};
+
 export const SUPPORTED_MODELS: ModelOption[] = [
   {
     id: "openai/gpt-oss-120b",
@@ -67,12 +72,34 @@ export const SUPPORTED_MODELS: ModelOption[] = [
   },
 ];
 
+export const MODEL_ALIASES: ModelAlias[] = [
+  { alias: "gpt-oss", modelId: "openai/gpt-oss-120b" },
+  { alias: "grok", modelId: "x-ai/grok-4.1-fast" },
+  {
+    alias: "gemini-flash-lite",
+    modelId: "google/gemini-3.1-flash-lite-preview",
+  },
+  {
+    alias: "llama-3.3",
+    modelId: "meta-llama/llama-3.3-70b-instruct",
+  },
+  { alias: "llama-4", modelId: "meta-llama/llama-4-maverick" },
+];
+
 export function getModelOption(modelId: string): ModelOption {
   const model = SUPPORTED_MODELS.find((entry) => entry.id === modelId);
   if (!model) {
     throw new Error(`Unsupported model: ${modelId}`);
   }
   return model;
+}
+
+export function resolveModelId(modelIdOrAlias: string) {
+  const input = modelIdOrAlias.trim();
+  const alias = MODEL_ALIASES.find((entry) => entry.alias === input);
+  const resolvedId = alias?.modelId ?? input;
+
+  return getModelOption(resolvedId).id;
 }
 
 export function buildReasoningPayload(
@@ -104,4 +131,11 @@ export function buildReasoningPayload(
 
 export function supportsLowReasoning(modelId: string) {
   return getModelOption(modelId).supportsLowReasoning;
+}
+
+export function normalizeReasoningMode(
+  modelId: string,
+  reasoningMode: ReasoningMode,
+): ReasoningMode {
+  return supportsLowReasoning(modelId) ? reasoningMode : "default";
 }

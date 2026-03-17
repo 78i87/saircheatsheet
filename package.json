@@ -8,7 +8,8 @@
     "start": "next start",
     "lint": "eslint",
     "test": "vitest run",
-    "test:watch": "vitest"
+    "test:watch": "vitest",
+    "eval": "tsx scripts/eval.ts"
   },
   "dependencies": {
     "better-sqlite3": "^12.8.0",
@@ -29,6 +30,7 @@
     "eslint-config-next": "16.1.6",
     "jsdom": "^28.1.0",
     "playwright": "^1.58.2",
+    "tsx": "^4.21.0",
     "typescript": "^5",
     "vitest": "^4.1.0"
   }

@@ -5,9 +5,6 @@ import Database from "better-sqlite3";
 
 import type { Difficulty } from "@/lib/models";
 
-const DATA_DIR = path.join(process.cwd(), "data");
-const DB_PATH = path.join(DATA_DIR, "sair-model-eval.sqlite");
-
 export type SeedProblem = {
   dataset_id: string;
   index: number;
@@ -30,8 +27,14 @@ let dbInstance: Database.Database | null = null;
 let initPromise: Promise<void> | null = null;
 
 function getDatabasePath() {
-  fs.mkdirSync(DATA_DIR, { recursive: true });
-  return DB_PATH;
+  const configuredPath = process.env.SAIR_DB_PATH?.trim();
+  const databasePath =
+    configuredPath && configuredPath.length > 0
+      ? path.resolve(configuredPath)
+      : path.join(process.cwd(), "data", "sair-model-eval.sqlite");
+
+  fs.mkdirSync(path.dirname(databasePath), { recursive: true });
+  return databasePath;
 }
 
 export function getDb() {
@@ -42,6 +45,15 @@ export function getDb() {
   }
 
   return dbInstance;
+}
+
+export function resetDatabaseForTests() {
+  if (dbInstance) {
+    dbInstance.close();
+  }
+
+  dbInstance = null;
+  initPromise = null;
 }
 
 export function applySchema(db: Database.Database) {
