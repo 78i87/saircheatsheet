@@ -1,0 +1,15 @@
+{
+  "id": "branch-000-root",
+  "title": "Root prompt branch",
+  "status": "active",
+  "baselineBatchId": 40,
+  "comparisonMode": "always_vs_baseline",
+  "startingPromptState": "empty_cheatsheet",
+  "parentBranchId": null,
+  "sourceIterationId": null,
+  "sourceCandidateId": null,
+  "promptFile": "automation/branches/branch-000-root/prompt.txt",
+  "latestBatchId": 40,
+  "latestCorrectCount": 80,
+  "latestDeltaVsBaseline": 0
+}

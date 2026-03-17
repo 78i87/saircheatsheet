@@ -1,0 +1,13 @@
+{
+  "baselineBatchId": 40,
+  "benchmark": {
+    "modelId": "openai/gpt-oss-120b",
+    "difficulty": "normal",
+    "problemSelection": "1-100",
+    "reasoningMode": "low"
+  },
+  "candidateCountPerIteration": 5,
+  "survivorMinNetGainVsBaseline": 2,
+  "survivorStrategy": "keep_all",
+  "promptFileName": "prompt.txt"
+}

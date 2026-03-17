@@ -16,12 +16,39 @@ const problemFixture = [
   },
   {
     id: 2,
+    datasetId: "normal_0002",
+    index: 2,
+    difficulty: "normal",
+    equation1: "x * y = z",
+    equation2: "z = x * y",
+    expectedAnswer: false,
+  },
+  {
+    id: 3,
+    datasetId: "normal_0003",
+    index: 3,
+    difficulty: "normal",
+    equation1: "x * (y * z) = w",
+    equation2: "w = x * (y * z)",
+    expectedAnswer: true,
+  },
+  {
+    id: 4,
     datasetId: "hard_0001",
     index: 1,
     difficulty: "hard",
     equation1: "x = z",
     equation2: "z = x",
     expectedAnswer: false,
+  },
+  {
+    id: 5,
+    datasetId: "hard_0002",
+    index: 2,
+    difficulty: "hard",
+    equation1: "(x * y) * z = u",
+    equation2: "u = (x * y) * z",
+    expectedAnswer: true,
   },
 ] as const;
 
@@ -155,6 +182,81 @@ describe("SairApp", () => {
     fireEvent.click(screen.getByRole("button", { name: /history/i }));
     expect(await screen.findByText(/batch #7/i)).toBeInTheDocument();
     expect(screen.getAllByText(/gpt oss 120b/i)[0]).toBeInTheDocument();
+  });
+
+  it("auto-selects numeric ranges in the active difficulty", async () => {
+    installFetchMock();
+    render(<SairApp />);
+
+    await screen.findByText(/choose a model, a cheatsheet, and a set of problems/i);
+
+    const problemSearch = screen.getByPlaceholderText(/quick search or range/i);
+    fireEvent.change(problemSearch, { target: { value: "1-2" } });
+
+    expect(screen.getByLabelText(/normal_0001/i)).toBeChecked();
+    expect(screen.getByLabelText(/normal_0002/i)).toBeChecked();
+    expect(screen.getByLabelText(/normal_0003/i)).not.toBeChecked();
+    expect(screen.getByRole("button", { name: /run 2 problems/i })).toBeEnabled();
+    expect(screen.getByText(/selecting 2 normal problems from numeric input/i)).toBeInTheDocument();
+  });
+
+  it("keeps numeric selections isolated by difficulty", async () => {
+    installFetchMock();
+    render(<SairApp />);
+
+    await screen.findByText(/choose a model, a cheatsheet, and a set of problems/i);
+
+    const problemSearch = screen.getByPlaceholderText(/quick search or range/i);
+    fireEvent.change(problemSearch, { target: { value: "1-2" } });
+    expect(screen.getByRole("button", { name: /run 2 problems/i })).toBeEnabled();
+
+    fireEvent.click(screen.getByRole("button", { name: /^hard$/i }));
+    expect(screen.getByLabelText(/hard_0001/i)).toBeChecked();
+    expect(screen.getByLabelText(/hard_0002/i)).toBeChecked();
+    expect(screen.getByRole("button", { name: /run 4 problems/i })).toBeEnabled();
+
+    fireEvent.change(problemSearch, { target: { value: "1" } });
+    expect(screen.getByLabelText(/hard_0001/i)).toBeChecked();
+    expect(screen.getByLabelText(/hard_0002/i)).not.toBeChecked();
+    expect(screen.getByRole("button", { name: /run 3 problems/i })).toBeEnabled();
+
+    fireEvent.click(screen.getByRole("button", { name: /^normal$/i }));
+    expect(screen.getByLabelText(/normal_0001/i)).toBeChecked();
+    expect(screen.getByLabelText(/normal_0002/i)).not.toBeChecked();
+    expect(screen.getByRole("button", { name: /run 2 problems/i })).toBeEnabled();
+  });
+
+  it("keeps plain text search behavior for non-numeric input", async () => {
+    installFetchMock();
+    render(<SairApp />);
+
+    await screen.findByText(/choose a model, a cheatsheet, and a set of problems/i);
+
+    const problemSearch = screen.getByPlaceholderText(/quick search or range/i);
+    fireEvent.change(problemSearch, { target: { value: "normal_0003" } });
+
+    expect(screen.getByLabelText(/normal_0003/i)).toBeInTheDocument();
+    expect(screen.queryByLabelText(/normal_0001/i)).not.toBeInTheDocument();
+    expect(screen.queryByLabelText(/normal_0002/i)).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /run 0 problems/i })).toBeDisabled();
+  });
+
+  it("shows numeric validation errors without clearing existing selection", async () => {
+    installFetchMock();
+    render(<SairApp />);
+
+    await screen.findByText(/choose a model, a cheatsheet, and a set of problems/i);
+
+    const problemSearch = screen.getByPlaceholderText(/quick search or range/i);
+    fireEvent.change(problemSearch, { target: { value: "1-2" } });
+    expect(screen.getByRole("button", { name: /run 2 problems/i })).toBeEnabled();
+
+    fireEvent.change(problemSearch, { target: { value: "1-" } });
+
+    expect(screen.getByText(/use indexes like 1,3,5-8/i)).toBeInTheDocument();
+    expect(screen.getByLabelText(/normal_0001/i)).toBeChecked();
+    expect(screen.getByLabelText(/normal_0002/i)).toBeChecked();
+    expect(screen.getByRole("button", { name: /run 2 problems/i })).toBeEnabled();
   });
 
   it("blocks oversized cheatsheets from being saved", async () => {

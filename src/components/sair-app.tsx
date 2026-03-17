@@ -21,6 +21,7 @@ import {
   type Difficulty,
   type ReasoningMode,
 } from "@/lib/models";
+import { isProblemRangeQuery, parseProblemRange } from "@/lib/problem-selection";
 import { formatStoredResponse } from "@/lib/run-output";
 
 type AppTab = "run" | "history";
@@ -390,24 +391,55 @@ export function SairApp() {
 
   const supportsReasoning = supportsLowReasoning(selectedModelId);
 
+  const problemSearchState = useMemo(() => {
+    const trimmed = search.trim();
+    if (!trimmed) {
+      return { kind: "empty" } as const;
+    }
+
+    if (!isProblemRangeQuery(trimmed)) {
+      return { kind: "text", query: trimmed.toLowerCase() } as const;
+    }
+
+    try {
+      const indexes = parseProblemRange(trimmed);
+      return {
+        kind: "range",
+        indexes,
+        indexSet: new Set(indexes),
+      } as const;
+    } catch (searchError) {
+      return {
+        kind: "range-error",
+        message:
+          searchError instanceof Error
+            ? searchError.message
+            : "Invalid problem selection.",
+      } as const;
+    }
+  }, [search]);
+
   const visibleProblems = useMemo(() => {
-    const query = search.trim().toLowerCase();
     return problems.filter((problem) => {
       if (problem.difficulty !== selectedDifficulty) {
         return false;
       }
 
-      if (!query) {
-        return true;
+      switch (problemSearchState.kind) {
+        case "empty":
+        case "range-error":
+          return true;
+        case "text":
+          return (
+            problem.datasetId.toLowerCase().includes(problemSearchState.query) ||
+            problem.equation1.toLowerCase().includes(problemSearchState.query) ||
+            problem.equation2.toLowerCase().includes(problemSearchState.query)
+          );
+        case "range":
+          return problemSearchState.indexSet.has(problem.index);
       }
-
-      return (
-        problem.datasetId.toLowerCase().includes(query) ||
-        problem.equation1.toLowerCase().includes(query) ||
-        problem.equation2.toLowerCase().includes(query)
-      );
     });
-  }, [problems, search, selectedDifficulty]);
+  }, [problemSearchState, problems, selectedDifficulty]);
 
   const selectedCount = selectedProblemIds.length;
   const visibleSelectedCount = visibleProblems.filter((problem) =>
@@ -416,6 +448,23 @@ export function SairApp() {
   const selectedCheatsheet = cheatsheets.find(
     (entry) => entry.id === selectedCheatsheetId,
   );
+  const problemSearchFeedback = useMemo(() => {
+    if (problemSearchState.kind === "range-error") {
+      return {
+        tone: "error" as const,
+        message: `${problemSearchState.message} Use indexes like 1,3,5-8.`,
+      };
+    }
+
+    if (problemSearchState.kind === "range") {
+      return {
+        tone: "info" as const,
+        message: `Selecting ${visibleProblems.length} ${selectedDifficulty} problem${visibleProblems.length === 1 ? "" : "s"} from numeric input.`,
+      };
+    }
+
+    return null;
+  }, [problemSearchState, selectedDifficulty, visibleProblems.length]);
 
   const historyBatches = useMemo(() => {
     return batches.filter((batch) => {
@@ -589,6 +638,36 @@ export function SairApp() {
       setHistoryBatch(currentBatch);
     }
   }, [currentBatch, currentBatchId, historyBatchId]);
+
+  useEffect(() => {
+    if (problemSearchState.kind !== "range") {
+      return;
+    }
+
+    const activeProblems = problems.filter(
+      (problem) => problem.difficulty === selectedDifficulty,
+    );
+    const activeProblemIds = new Set(activeProblems.map((problem) => problem.id));
+    const nextDifficultySelection = activeProblems
+      .filter((problem) => problemSearchState.indexSet.has(problem.index))
+      .map((problem) => problem.id);
+
+    setSelectedProblemIds((existing) => {
+      const nextSelection = [
+        ...existing.filter((problemId) => !activeProblemIds.has(problemId)),
+        ...nextDifficultySelection,
+      ];
+
+      if (
+        existing.length === nextSelection.length &&
+        existing.every((problemId, index) => problemId === nextSelection[index])
+      ) {
+        return existing;
+      }
+
+      return nextSelection;
+    });
+  }, [problemSearchState, problems, selectedDifficulty]);
 
   const submitRun = async () => {
     setSubmittingRun(true);
@@ -920,10 +999,21 @@ export function SairApp() {
 
                   <input
                     className="field"
-                    placeholder='Quick search (e.g. "hard_0001" or equation text)'
+                    placeholder='Quick search or range (e.g. "hard_0001" or "1-50")'
                     value={search}
                     onChange={(event) => setSearch(event.target.value)}
                   />
+                  {problemSearchFeedback ? (
+                    <p
+                      className={
+                        problemSearchFeedback.tone === "error"
+                          ? "section-meta section-meta--error"
+                          : "section-meta"
+                      }
+                    >
+                      {problemSearchFeedback.message}
+                    </p>
+                  ) : null}
 
                   <div className="dataset-tabs">
                     <button
